@@ -1,0 +1,5 @@
+livekit-agents
+google-generativeai
+mem0ai
+python-dotenv
+asyncio
