@@ -97,11 +97,16 @@ LIVEKIT_API_SECRET=your_livekit_secret
 
 ### Start the Backend
 
-1. Make sure you're in the backend directory with the virtual environment activated
-2. Run the agent:
-   ```bash
-   py echo_agent.py dev
-   ```
+1.  Make sure you're in the backend directory with the virtual environment activated
+
+    ```bash
+    cd convoflow-backend
+    ```
+
+2.  Run the agent:
+    ```bash
+    py echo_agent.py dev
+    ```
 
 ### Start the Frontend
 
