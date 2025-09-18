@@ -93,7 +93,7 @@ const ChatPage = () => {
                 }
 
                 const responseData = await response.json();
-                console.log('API Response:', responseData);
+                // console.log('API Response:', responseData);
 
                 const { token } = responseData;
 
@@ -106,7 +106,7 @@ const ChatPage = () => {
                 const newRoom = new Room();
 
                 newRoom.on(RoomEvent.Connected, () => {
-                    console.log('Connected to Room');
+                    // console.log('Connected to Room');
                     setIsConnected(true);
                     setConnectionStatus("Connected");
                     addMessage("SYSTEM", "Connected to chat room successfully!");
@@ -117,7 +117,7 @@ const ChatPage = () => {
                         const receivedMessage = new TextDecoder().decode(payload);
                         const senderName = participant?.identity || "BOT";
 
-                        console.log(`Message from ${senderName}: ${receivedMessage}`);
+                        // console.log(`Message from ${senderName}: ${receivedMessage}`);
 
                         // Only add message if it's not from the current user (to avoid duplicates)
                         if (senderName !== username) {
@@ -128,8 +128,8 @@ const ChatPage = () => {
                     }
                 });
 
-                newRoom.on(RoomEvent.Disconnected, (reason) => {
-                    console.log('Disconnected from Room:', reason);
+                newRoom.on(RoomEvent.Disconnected, () => {
+                    // console.log('Disconnected from Room:', reason);
                     setIsConnected(false);
                     setConnectionStatus("Disconnected");
                     addMessage("SYSTEM", "Disconnected from chat room.");
@@ -145,20 +145,20 @@ const ChatPage = () => {
                     addMessage("SYSTEM", "Reconnected successfully!");
                 });
 
-                newRoom.on(RoomEvent.ConnectionQualityChanged, (quality, participant) => {
-                    console.log('Connection quality changed:', quality, participant?.identity);
-                });
+                // newRoom.on(RoomEvent.ConnectionQualityChanged, (quality, participant) => {
+                //     console.log('Connection quality changed:', quality, participant?.identity);
+                // });
 
                 // Handle participant events
                 newRoom.on(RoomEvent.ParticipantConnected, (participant) => {
-                    console.log('Participant connected:', participant.identity);
+                    // console.log('Participant connected:', participant.identity);
                     if (participant.identity !== username) {
                         addMessage("SYSTEM", `${participant.identity} joined the chat`);
                     }
                 });
 
                 newRoom.on(RoomEvent.ParticipantDisconnected, (participant) => {
-                    console.log('Participant disconnected:', participant.identity);
+                    // console.log('Participant disconnected:', participant.identity);
                     if (participant.identity !== username) {
                         addMessage("SYSTEM", `${participant.identity} left the chat`);
                     }
