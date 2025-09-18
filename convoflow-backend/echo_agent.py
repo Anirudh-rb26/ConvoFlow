@@ -1,164 +1,252 @@
 import asyncio
+import logging
 import os
-import json
-from typing import List, Dict
-from datetime import datetime
-from livekit import agents, api
-from livekit.agents import AutoSubscribe, JobContext, WorkerOptions, cli
+from dotenv import load_dotenv
+from livekit import rtc
 import google.generativeai as genai
+import jwt
+import time
 
-# Configure APIs
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
-class SimpleMemoryStore:
+# Load environment variables
+load_dotenv()
+
+
+# Configure logging
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+
+class GeminiAgent:
     def __init__(self):
-        self.memory_file = "user_memories.json"
-        self.memories = self.load_memories()
-    
-    def load_memories(self) -> Dict:
-        """Load memories from JSON file"""
-        try:
-            if os.path.exists(self.memory_file):
-                with open(self.memory_file, 'r') as f:
-                    return json.load(f)
-        except Exception as e:
-            print(f"Error loading memories: {e}")
-        return {}
-    
-    def save_memories(self):
-        """Save memories to JSON file"""
-        try:
-            with open(self.memory_file, 'w') as f:
-                json.dump(self.memories, f, indent=2, default=str)
-        except Exception as e:
-            print(f"Error saving memories: {e}")
-    
-    def get_user_context(self, username: str, limit: int = 5) -> str:
-        """Get recent conversation context for user"""
-        if username not in self.memories:
-            return f"This is your first conversation with {username}."
-        
-        user_history = self.memories[username]
-        recent_conversations = user_history[-limit:] if len(user_history) > limit else user_history
-        
-        if not recent_conversations:
-            return f"This is your first conversation with {username}."
-        
-        context = f"Previous interactions with {username}:\n"
-        for conv in recent_conversations:
-            timestamp = conv.get('timestamp', 'Unknown time')
-            user_msg = conv.get('user_message', '')
-            bot_msg = conv.get('bot_response', '')
-            context += f"[{timestamp}] User: {user_msg} | Bot: {bot_msg}\n"
-        
-        return context
-    
-    def save_interaction(self, username: str, user_message: str, bot_response: str):
-        """Save interaction to memory"""
-        if username not in self.memories:
-            self.memories[username] = []
-        
-        interaction = {
-            'timestamp': datetime.now().isoformat(),
-            'user_message': user_message,
-            'bot_response': bot_response
-        }
-        
-        self.memories[username].append(interaction)
-        
-        # Keep only last 20 interactions per user to prevent memory overflow
-        if len(self.memories[username]) > 20:
-            self.memories[username] = self.memories[username][-20:]
-        
-        self.save_memories()
-
-class ChatAgent:
-    def __init__(self):
-        self.model = genai.GenerativeModel('gemini-1.5-flash')
-        self.memory = SimpleMemoryStore()
         self.room = None
+        self.model = None
+        self.setup_gemini()
     
-    async def generate_response(self, username: str, user_message: str) -> str:
-        """Generate AI response using Gemini with user context"""
+    def setup_gemini(self):
+        """Initialize Gemini API"""
         try:
-            # Get user's conversation history
-            context = self.memory.get_user_context(username)
-            
-            # Craft prompt with context
-            prompt = f"""
-You are a helpful AI assistant in a LiveKit chat room. Here's the context about your previous conversations:
-
-{context}
-
-Current user: {username}
-User's message: {user_message}
-
-Respond naturally and personally, acknowledging any relevant previous conversations if they exist. Keep responses conversational, engaging, and concise (1-3 sentences typically). If this is a first conversation, introduce yourself warmly.
-"""
-            
-            response = await asyncio.to_thread(
-                self.model.generate_content, prompt
-            )
-            
-            bot_response = response.text.strip()
-            
-            # Save this interaction for future reference
-            self.memory.save_interaction(username, user_message, bot_response)
-            
-            return bot_response
-            
+            genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+            self.model = genai.GenerativeModel('gemini-2.0-flash-exp')
+            logger.info("✅ Gemini model initialized successfully")
         except Exception as e:
-            print(f"Error generating response: {e}")
-            return "Sorry, I'm having trouble processing your message right now. Please try again!"
+            logger.error(f"❌ Failed to initialize Gemini: {e}")
+            raise
 
-chat_agent = ChatAgent()
 
-async def entrypoint(ctx: JobContext):
-    """Main entry point for the LiveKit agent"""
-    initial_ctx = ctx.job.room.url or ctx.job.room.name
-    print(f"🤖 AI Agent connecting to room: {initial_ctx}")
-    
-    await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
-    chat_agent.room = ctx.room
-    
-    # Send welcome message
-    await ctx.room.local_participant.publish_data(
-        "🤖 AI Assistant has joined the chat! I remember our previous conversations. Say hello!",
-        reliable=True
-    )
-    print("🤖 Welcome message sent")
-    
-    @ctx.room.on("data_received")
-    async def on_data_received(data: api.DataPacket):
-        """Handle incoming text messages"""
-        if data.participant.identity == ctx.room.local_participant.identity:
-            return  # Ignore messages from the agent itself
+    async def connect_to_room(self, room_name="chat-room", identity="gemini-agent"):
+        """Connect to LiveKit room"""
+        try:
+            # Generate JWT token
+            token = self.generate_token(room_name, identity)
+            
+            # Connect to room
+            self.room = rtc.Room()
+            await self.room.connect(os.getenv("LIVEKIT_URL"), token)
+            logger.info(f"✅ Connected to room: {room_name}")
+            
+            # Set up event handlers
+            self.setup_event_handlers()
+            
+            return self.room
+        except Exception as e:
+            logger.error(f"❌ Failed to connect to room: {e}")
+            raise
+
+
+    def generate_token(self, room_name, identity):
+        """Generate JWT token for room access"""
+        api_key = os.getenv("LIVEKIT_API_KEY")
+        api_secret = os.getenv("LIVEKIT_API_SECRET")
         
-        username = data.participant.identity
-        message = data.data.decode('utf-8')
+        if not api_key or not api_secret:
+            raise ValueError("Missing LIVEKIT_API_KEY or LIVEKIT_API_SECRET")
         
-        print(f"📨 [{username}]: {message}")
-        
-        # Generate AI response with memory
-        response = await chat_agent.generate_response(username, message)
-        
-        # Send response back to the room
-        await ctx.room.local_participant.publish_data(
-            response,
-            reliable=True
+        token = jwt.encode(
+            {
+                "iss": api_key,
+                "exp": int(time.time()) + 3600,
+                "nbf": int(time.time()),
+                "video": {
+                    "room": room_name,
+                    "roomJoin": True,
+                    "canPublish": True,
+                    "canSubscribe": True,
+                    "canPublishData": True,
+                },
+                "sub": identity,
+            },
+            api_secret,
+            algorithm="HS256",
         )
         
-        print(f"🤖 [Bot]: {response}")
+        return token
+
+
+    def setup_event_handlers(self):
+        """Set up all event handlers for the room"""
+        
+        # Data message handler - FIXED VERSION
+        @self.room.on("data_received")
+        def on_data_received(data_packet: rtc.DataPacket):
+            logger.info(f"🔥 DATA RECEIVED EVENT FIRED!")
+            logger.info(f"📨 Raw data: {data_packet.data}")
+            logger.info(f"👤 From participant: {data_packet.participant.identity if data_packet.participant else 'Unknown'}")
+            logger.info(f"📋 Topic: {data_packet.topic}")
+            
+            # Process the message asynchronously - FIXED: Pass both parameters
+            asyncio.create_task(self.handle_message(data_packet.data, data_packet.participant))
+        
+        # Participant events
+        @self.room.on("participant_connected")
+        def on_participant_connected(participant: rtc.RemoteParticipant):
+            logger.info(f"👋 New participant joined: {participant.identity}")
+            asyncio.create_task(self.send_welcome_message(participant))
+        
+        @self.room.on("participant_disconnected")
+        def on_participant_disconnected(participant: rtc.RemoteParticipant):
+            logger.info(f"👋 Participant left: {participant.identity}")
+        
+        # Track published/unpublished for debugging
+        @self.room.on("track_published")
+        def on_track_published(publication: rtc.RemoteTrackPublication, participant: rtc.RemoteParticipant):
+            logger.info(f"🎵 Track published by {participant.identity}: {publication.kind}")
+        
+        # Room connection state changes
+        @self.room.on("connection_state_changed")
+        def on_connection_state_changed(state: rtc.ConnectionState):
+            logger.info(f"🔗 Connection state changed to: {state}")
+        
+        logger.info("✅ All event handlers registered")
+
+
+    async def handle_message(self, data: bytes, participant: rtc.RemoteParticipant = None):
+        """Handle incoming text messages and respond with Gemini"""
+        try:
+            # Decode the message
+            message = data.decode('utf-8')
+            sender_identity = participant.identity if participant else "Unknown"
+            
+            logger.info(f"💬 PROCESSING MESSAGE from {sender_identity}: '{message}'")
+            
+            # Skip messages from agents/bots to avoid loops
+            if any(keyword in sender_identity.lower() for keyword in ["agent", "bot", "gemini", "ai"]):
+                logger.info(f"⏭️ Ignoring message from agent: {sender_identity}")
+                return
+            
+            # Generate response using Gemini
+            logger.info("🧠 Generating response with Gemini...")
+            try:
+                prompt = f"""You are a helpful AI assistant in a chat room. 
+A user named {sender_identity} just sent you this message: "{message}"
+
+Please provide a helpful, concise, and engaging response (max 2-3 sentences).
+Keep it conversational and friendly."""
+                
+                response = self.model.generate_content(prompt)
+                gemini_response = response.text.strip()
+                
+                logger.info(f"✅ Generated response: {gemini_response}")
+                
+            except Exception as e:
+                logger.error(f"❌ Error with Gemini API: {e}")
+                gemini_response = f"Hi {sender_identity}! I'm having some technical difficulties right now, but I'm here and ready to help. Please try asking me something else!"
+            
+            # Send response back to the room
+            await self.send_message(gemini_response)
+            
+        except Exception as e:
+            logger.error(f"❌ Error handling message: {e}", exc_info=True)
+
+
+    async def send_message(self, message: str):
+        """Send a message to the room"""
+        try:
+            await self.room.local_participant.publish_data(
+                payload=message.encode('utf-8'),
+                reliable=True
+            )
+            logger.info("📤 Message sent successfully to room")
+        except Exception as e:
+            logger.error(f"❌ Failed to send message: {e}")
+
+
+    async def send_welcome_message(self, participant: rtc.RemoteParticipant = None):
+        """Send welcome message"""
+        try:
+            await asyncio.sleep(1)  # Small delay
+            if participant:
+                welcome = f"👋 Welcome {participant.identity}! I'm an AI assistant powered by Gemini. Send me a message to chat!"
+            else:
+                welcome = "🤖 AI Assistant powered by Gemini has joined! Send me a message and I'll respond."
+            
+            await self.send_message(welcome)
+            logger.info(f"✅ Welcome message sent")
+        except Exception as e:
+            logger.error(f"❌ Failed to send welcome message: {e}")
+
+
+    async def run(self):
+        """Main run loop"""
+        try:
+            await self.connect_to_room()
+            
+            # Send initial welcome message
+            await asyncio.sleep(2)
+            await self.send_welcome_message()
+            
+            # Log current state
+            participants = list(self.room.remote_participants.values())
+            logger.info(f"📊 Current participants: {[p.identity for p in participants]}")
+            logger.info(f"🆔 Agent identity: {self.room.local_participant.identity}")
+            logger.info("🎉 Agent is ready and listening for messages!")
+            logger.info("📱 Try sending a data message from your client...")
+            
+            # Keep running with periodic status updates
+            counter = 0
+            while self.room.connection_state == rtc.ConnectionState.CONN_CONNECTED:
+                await asyncio.sleep(10)
+                counter += 1
+                logger.info(f"💓 Agent heartbeat #{counter} - Connection: {self.room.connection_state}")
+                
+                # Log participants for debugging
+                participants = list(self.room.remote_participants.values())
+                logger.debug(f"📊 Active participants: {[p.identity for p in participants]}")
+                
+                # If we have participants but no messages, log a reminder
+                if participants and counter % 6 == 0:  # Every minute
+                    logger.warning("⚠️ Participants connected but no messages received. Check client implementation.")
+                
+        except Exception as e:
+            logger.error(f"❌ Error in main loop: {e}", exc_info=True)
+            raise
+
+
+def main():
+    """Main entry point"""
+    logger.info("🔧 Starting LiveKit Gemini Chat Agent...")
     
-    print("🤖 Agent is ready and listening for messages...")
+    # Check required environment variables
+    required_vars = ["LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET", "GEMINI_API_KEY"]
+    missing_vars = [var for var in required_vars if not os.getenv(var)]
+    if missing_vars:
+        logger.error(f"❌ Missing environment variables: {missing_vars}")
+        return
+
+    logger.info(f"🌐 LiveKit URL: {os.getenv('LIVEKIT_URL')}")
+    logger.info(f"🔑 LiveKit API Key: {os.getenv('LIVEKIT_API_KEY')[:8]}...")
+    logger.info(f"🔑 Gemini API Key: {'*' * 8}{os.getenv('GEMINI_API_KEY', '')[-4:]}")
+
+    # Create and run agent
+    agent = GeminiAgent()
+    
+    try:
+        asyncio.run(agent.run())
+    except KeyboardInterrupt:
+        logger.info("🛑 Agent stopped by user")
+    except Exception as e:
+        logger.error(f"❌ Agent failed: {e}", exc_info=True)
+
 
 if __name__ == "__main__":
-    # Load environment variables
-    from dotenv import load_dotenv
-    load_dotenv()
-    
-    cli.run_app(
-        WorkerOptions(
-            entrypoint_fnc=entrypoint,
-        )
-    )
+    main()
