@@ -31,14 +31,17 @@ const ChatPage = () => {
     }
 
     const handleSendMessage = async () => {
+        if (!message.trim() || !room || !isConnected) return;
+
         setMessages(prev => [...prev, { sender: username, text: message }]);
-        setMessage(message);
 
         const encoder = new TextEncoder();
         await room?.localParticipant.publishData(
             encoder.encode(message),
             { reliable: true }
-        )
+        );
+
+        setMessage(""); // Clear the input after sending
     };
 
     const handleKeyPress = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -61,33 +64,48 @@ const ChatPage = () => {
                     headers: {
                         'Content-Type': 'application/json',
                     },
-                    body: JSON.stringify({ username: username, messagge: message }),
+                    body: JSON.stringify({
+                        username: username,
+                        room: 'chat-room' // You can make this dynamic if needed
+                    }),
                 });
 
                 if (!response.ok) {
-                    throw new Error('Failed to fetch token');
+                    const errorText = await response.text();
+                    console.error('API Error:', response.status, errorText);
+                    throw new Error(`Failed to fetch token: ${response.status} ${errorText}`);
                 }
 
-                const { token } = await response.json();
+                const responseData = await response.json();
+                console.log('API Response:', responseData);
+
+                const { token } = responseData;
+
+                if (!token) {
+                    throw new Error('No token received from API');
+                }
+
+                console.log('Token received:', token ? 'Token exists' : 'No token');
 
                 setConnectionStatus("Establishing Connection...");
 
                 const newRoom = new Room();
+
                 newRoom.on(RoomEvent.Connected, () => {
                     console.log('Connected to Room')
                     setIsConnected(true);
                     setConnectionStatus("Connected");
 
-                    setMessages(prev => [...prev, { sender: "BOT", text: "You are now connected to the chat!" }, ...prev]);
+                    setMessages(prev => [{ sender: "BOT", text: "You are now connected to the chat!" }, ...prev]);
                 });
 
                 newRoom.on(RoomEvent.DataReceived, (payload: Uint8Array, participant?: RemoteParticipant) => {
-                    const messaage = new TextDecoder().decode(payload);
-                    const sendername = "BOT"
+                    const receivedMessage = new TextDecoder().decode(payload);
+                    const senderName = participant?.identity || "BOT";
 
-                    console.log(`Message from ${sendername}: ${message}`);
+                    console.log(`Message from ${senderName}: ${receivedMessage}`);
 
-                    setMessages(prev => [...prev, { sender: sendername, text: messaage }]);
+                    setMessages(prev => [...prev, { sender: senderName, text: receivedMessage }]);
                 });
 
                 newRoom.on(RoomEvent.Disconnected, () => {
@@ -104,15 +122,22 @@ const ChatPage = () => {
                     setConnectionStatus("Connected");
                 });
 
-                await newRoom.connect(process.env.LIVEKIT_URL!, token);
+                // Use the NEXT_PUBLIC_ prefixed environment variable
+                const livekitUrl = process.env.NEXT_PUBLIC_LIVEKIT_URL;
+
+                if (!livekitUrl) {
+                    throw new Error('LiveKit URL not configured');
+                }
+
+                await newRoom.connect(livekitUrl, token);
                 setRoom(newRoom);
+
             } catch (error) {
                 console.error("Error Connecting to Room", error);
                 setConnectionStatus("Connection Failed");
                 setMessages(prev => [{
-                    sender: "system",
-                    text: "Failed to connect to chat room. Please refresh and try again.",
-                    timestamp: new Date()
+                    sender: "BOT",
+                    text: "Failed to connect to chat room. Please refresh and try again."
                 }, ...prev]);
             }
         };
@@ -153,6 +178,7 @@ const ChatPage = () => {
                         </div>
                     ))
                 )}
+                <div ref={messagesEndRef} />
             </div>
 
             {/* Input Bar */}

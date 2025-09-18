@@ -12,7 +12,7 @@ export default function Home() {
   const [username, setUsername] = useState("");
 
   const handleJoinRoom = () => {
-    router.push(`/chat/${encodeURIComponent(username)}`)
+    router.push(`/chat/${username}`)
   }
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
@@ -32,7 +32,7 @@ export default function Home() {
             value={username}
             onKeyDown={handleKeyPress}
             placeholder="Enter an Username"
-            className="focus-visible:ring-green-300"
+            className="focus-visible:ring-green-300 text-white"
             onChange={(e) => setUsername(e.target.value)}
           />
           <Button
