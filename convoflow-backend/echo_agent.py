@@ -164,31 +164,74 @@ class GeminiAgentWithMemory:
         logger.info("✅ All event handlers registered")
 
     async def retrieve_memories(self, query: str, user_id: str) -> str:
-        """Retrieve relevant memories from Mem0"""
+        """Retrieve relevant memories from Mem0 with improved search and fallback"""
         if not self.memory_client:
             return ""
             
         try:
             logger.info(f"🧠 Retrieving memories for user {user_id} with query: {query}")
             
-            # Search for relevant memories
+            # First try search for relevant memories
             search_results = await self.memory_client.search(
                 query=query,
                 user_id=user_id,
-                limit=10  # Increased limit for better recall
+                limit=15  # Increased limit for better recall
             )
             
+            memories = []
             if search_results and 'results' in search_results:
-                memories = []
                 for result in search_results['results']:
                     memory_content = result.get('memory', '')
                     if memory_content:
                         memories.append(f"- {memory_content}")
-                
-                if memories:
-                    memory_context = "\n".join(memories)
-                    logger.info(f"✅ Retrieved {len(memories)} relevant memories")
-                    return f"Relevant memories about this user:\n{memory_context}\n\n"
+            
+            # Enhanced fallback: if few results OR query contains key terms, also check all memories
+            query_lower = query.lower()
+            should_use_fallback = (
+                len(memories) < 2 or  # Few search results
+                any(keyword in query_lower for keyword in [
+                    'name', 'who', 'identity', 'call me', 'drink', 'prefer', 'like',
+                    'favorite', 'love', 'hate', 'enjoy', 'want', 'choose', 'pick'
+                ])
+            )
+            
+            if should_use_fallback:
+                logger.info("🔄 Using enhanced fallback to get all memories")
+                try:
+                    all_memories_response = await self.memory_client.get_all(user_id=user_id)
+                    if all_memories_response and isinstance(all_memories_response, list):
+                        # Add relevant memories from all memories
+                        fallback_memories = []
+                        for memory_obj in all_memories_response:
+                            if isinstance(memory_obj, dict):
+                                memory_text = memory_obj.get('memory', memory_obj.get('text', ''))
+                                if memory_text:
+                                    # Check if this memory is relevant to the query
+                                    memory_lower = memory_text.lower()
+                                    
+                                    # For name queries
+                                    if any(name_word in query_lower for name_word in ['name', 'who am i', 'call me']) and \
+                                       any(name_indicator in memory_lower for name_indicator in ['name is', 'called', 'name:']):
+                                        fallback_memories.append(f"- {memory_text}")
+                                    
+                                    # For preference queries (drinks, food, etc.)
+                                    elif any(pref_word in query_lower for pref_word in ['drink', 'prefer', 'like', 'favorite', 'love', 'choose']) and \
+                                         any(pref_indicator in memory_lower for pref_indicator in ['prefer', 'love', 'like', 'drink', 'favorite', 'choose']):
+                                        fallback_memories.append(f"- {memory_text}")
+                        
+                        # Add unique fallback memories that aren't already in the search results
+                        for fb_memory in fallback_memories:
+                            if fb_memory not in memories:
+                                memories.append(fb_memory)
+                                logger.info(f"✅ Added fallback memory: {fb_memory[:50]}...")
+                        
+                except Exception as fallback_error:
+                    logger.warning(f"⚠️ Fallback memory retrieval failed: {fallback_error}")
+            
+            if memories:
+                memory_context = "\n".join(memories)
+                logger.info(f"✅ Retrieved {len(memories)} total relevant memories")
+                return f"Relevant memories about this user:\n{memory_context}\n\n"
             
             logger.info("ℹ️ No relevant memories found")
             return ""
@@ -307,19 +350,21 @@ class GeminiAgentWithMemory:
             logger.info("🧠 Generating response with Gemini and memory context...")
             
             try:
-                # Enhanced prompt with memory context
-                if memory_context:
+                # Enhanced prompt with memory context - FIXED to prevent hallucination and use stored info
+                if memory_context.strip():
                     prompt = f"""You are a helpful AI assistant in a chat room with memory capabilities.
 
 {memory_context}User {sender_identity} just sent: "{message}"
 
-Respond naturally and conversationally (1-2 sentences max). If you have relevant memories, reference them naturally. Be friendly and helpful."""
+IMPORTANT: Use the memories provided above to answer. If the user's real name is stored in memories, use that name instead of their username. Pay attention to their stated preferences and past interactions.
+
+Respond naturally and conversationally (1-2 sentences max). Only reference memories that are explicitly provided above. Be friendly and helpful."""
                 else:
                     prompt = f"""You are a helpful AI assistant in a chat room.
 
 User {sender_identity} just sent: "{message}"
 
-Respond naturally and conversationally (1-2 sentences max). Be friendly and helpful."""
+Respond naturally and conversationally (1-2 sentences max). You have no previous memories about this user. Do not make up or assume any past interactions. Be friendly and helpful."""
 
                 # FIXED: Add timeout and proper error handling for Gemini
                 response = await asyncio.wait_for(
